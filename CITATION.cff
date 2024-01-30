@@ -1,0 +1,31 @@
+# This CITATION.cff file was generated with cffinit.
+# Visit https://bit.ly/cffinit to generate yours today!
+
+cff-version: 1.2.0
+title: Dd-Mm-growth-assay-analysis
+message: >-
+  If you use this software, please cite it using the
+  metadata from this file.
+type: software
+authors:
+  - given-names: Jahn
+    family-names: Nitschke
+    email: jahn_nitschke@hotmail.de
+    affiliation: University of Geneva
+    orcid: 'https://orcid.org/0000-0003-3838-0945'
+url: >-
+  https://www.unige.ch/sciences/biochimie/labs/thierry-soldati/
+abstract: >-
+  This set of scripts are custom built R scripts to
+  facilitate automatized analysis of bacteria and amoeba
+  growth curves obtained from an Agilent BioTek Synergy H1
+  plate reader. It creates pdf reports with troubleshooting
+  plots and calculates a robust Z'-factor for every plate.
+keywords:
+  - High-throughput compound screen
+  - microbiology
+  - infection biology
+  - data normalization
+license: MIT
+version: '1'
+date-released: '2024-01-31'
