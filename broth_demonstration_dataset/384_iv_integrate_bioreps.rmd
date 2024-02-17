@@ -1,0 +1,513 @@
+---
+title: "Integrate biological replicates from different assay plates"
+author: "JN"
+date: "`r date()`"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+#this script collects biological replicate data (normalized residual growth) and integrates them as summary data.
+#also, it outputs some troubleshooting plots and visualizations
+#assumes all plates have the same set of vehicle controls and the same number of time points
+
+#clean workspace
+rm(list=ls())
+
+library(xlsx)
+library(readxl)
+library(gplots)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(reshape2)
+
+#colors for heatmap
+heatcols <- colorRampPalette(c("deepskyblue2", "white", "brown1"))( 75 )
+
+#split string function, written by Fred
+mySplit <- function(s, i, sep) strsplit(s, sep)[[1]][i]
+
+#in and output paths
+input <- "C:/Users/jahn_/Desktop/analyses/broth_demonstration_dataset/input"
+output <- "C:/Users/jahn_/Desktop/analyses/broth_demonstration_dataset/output/"
+```
+
+```{r, echo=FALSE}
+
+all_files <- list.files(input, pattern="*.xlsx", all.files=FALSE,
+    full.names=TRUE)
+
+all_files_filenames <- list.files(input, pattern="*.xlsx", all.files=FALSE,
+    full.names=FALSE)
+
+print(c("all raw data xlsx files in the directory, absolute paths: ", all_files))
+print(c("all raw data xlsx files in the directory: ", all_files_filenames))
+
+```
+```{r, echo=FALSE}
+#read saved rdata from
+all_files_r <- list.files(output, pattern="*xlsx.RData", all.files=FALSE,
+    full.names=TRUE)
+
+all_files_filenames_r <- list.files(output, pattern="*xlsx.RData", all.files=FALSE,
+    full.names=FALSE)
+
+print(c("all corresponding RData files in the directory: ", all_files_r))
+
+```
+
+```{r, echo=FALSE}
+#load all Rdata sets and store them in a list of lists
+all_datasets <- list()
+for (k in seq(1, length(all_files_r))) {
+  load(all_files_r[k])
+  all_datasets[[k]] <- out
+}
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE, results='show'}
+#fetch and plot temperature of every plate
+
+temp_all <- data.frame(matrix(ncol = 3, nrow = 0))
+for (k in seq(1, length(all_datasets))){
+  tmp <- cbind(all_datasets[[k]]$timepoints, 
+               all_datasets[[k]]$temp, 
+               rep(all_datasets[[k]]$filename, dim(all_datasets[[k]]$temp)[1]))
+  temp_all <- rbind(temp_all, tmp)
+}
+colnames(temp_all) <- c("timepoint", "temp", "plate")
+
+
+p<-ggplot(temp_all, aes(x=timepoint, y=temp, group=plate)) +
+  geom_line(aes(color=plate))+
+  geom_point(aes(color=plate))
+p
+
+
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE, results='show'}
+#this chunk plots an aligned heatmap of conditions present in all bioreps (RLU)
+
+#fetch lum of all plates
+#show heatmap for raw data, common conditions in brs are stacked on top of each other
+
+#initialise empty container variables before looping over plates
+lum_tmp <- data.frame(matrix(ncol = 0,
+                             nrow = nrow(all_datasets[[1]]$timepoints)))
+meta_data_tmp <- data.frame(matrix(ncol = 5,
+                             nrow = 0))
+
+#fetch all lum datasets and associated metadata and append them
+for (k in seq(1, length(all_datasets))){
+  lum_tmp <- cbind(lum_tmp, all_datasets[[k]]$rlu_data_sorted)
+  meta_data_tmp <- rbind(meta_data_tmp, all_datasets[[k]]$meta_data_sorted)
+}
+lum_tmp <- sapply(lum_tmp, as.numeric)
+
+meta_data <- meta_data_tmp
+
+#ensure sorting by br
+br_idx <- order(meta_data$br)
+lum_tmp <- lum_tmp[, br_idx]
+meta_data <- meta_data[ br_idx, ]
+
+#do the brs on this plate have the same size?
+all_br <- unique(meta_data$br)
+for(i in seq(1, length(all_br))){
+  print(sum(meta_data$br == all_br[i]))
+}
+
+#find common conditions in the 3 brs
+
+#generate fused labels within brs
+meta_data <- cbind(meta_data, meta_data[,c(1,3,4)] %>% unite(col = "br_label", sep = ","))
+meta_data_by_br <- meta_data %>% group_split(br)
+
+
+#find unique conditions present in all brs
+int_tmp <- meta_data_by_br[[1]]$br_label
+for (i in seq(2, length(meta_data_by_br))){
+  int_tmp <- intersect(int_tmp, meta_data_by_br[[i]]$br_label)
+}
+int_tmp <- unique(int_tmp)
+
+#iterate over unique conditions and fetch their least nr of instances
+meta_data_int <- data.frame(matrix(ncol = ncol(meta_data),
+                             nrow = 0))
+names(meta_data_int) <- names(meta_data)
+for (i in seq(1, length(int_tmp))){
+  this_cond <- int_tmp[i]
+  #find smallest nr of instances over all brs
+  count <- 99999
+  for (j in seq(1, length(meta_data_by_br))){
+    count_new <- sum(meta_data_by_br[[j]]$br_label %in% this_cond)
+    if (count_new < count) {
+      count <- count_new
+    }
+  }
+  
+  #collect this condition from all brs "count" times
+  for (j in seq(1, length(meta_data_by_br))){
+    meta_data_int <- rbind(meta_data_int, meta_data_by_br[[j]][meta_data_by_br[[j]]$br_label == this_cond, ][c(seq(1,count)),])
+  }
+}
+
+#ensure sorting by br
+br_idx <- order(meta_data_int$br)
+meta_data_int <- meta_data_int[ br_idx, ]
+
+#take corresponding lum_tmp data
+common_idx <- match(do.call("paste", meta_data_int), do.call("paste", meta_data))
+lum_tmp_int <- lum_tmp[, common_idx]
+
+#split by br and
+incr <- dim(lum_tmp_int)[2]/length(all_br)
+start_cols <- seq(1, length(all_br)*incr, incr )
+end_cols <- seq(incr, length(all_br)*incr, incr)  
+
+lum_stacked <- matrix(ncol = incr,
+                             nrow = 0)
+meta_data_stacked <- as.data.frame(matrix(ncol = 0,
+                             nrow = incr))
+for (i in seq(1, length(all_br))){
+  lum_stacked <- rbind(lum_stacked, lum_tmp_int[, start_cols[i]:end_cols[i]])
+  meta_data_stacked <- cbind(meta_data_stacked, meta_data_int[start_cols[i]:end_cols[i],])
+}
+
+#create a label from fused columns, cond, conc, vc and all wells
+meta_lab <- cbind(meta_data_stacked[,c(4,3,1)], meta_data_stacked[which(colnames(meta_data_stacked) == "well")]) %>% unite(col = "V1", sep = " ")
+time_lab <- rep(seq(1, dim(lum_tmp)[1]/length(all_datasets)), length(all_br))
+
+#align by br and plot
+#problematic if not exactly the same (e.g. by pippetting mistake)
+
+#heatmap for raw data
+pdf(paste0(output, "01_integrate_bioreps_aligned_brs_RLU.pdf"), width = 100, height = 50)
+heatmap.2(lum_stacked,
+          cellnote = round(lum_stacked, 1),
+          notecex=0.5,
+          notecol="black",
+          col=heatcols,
+          dendrogram = 'none',
+          scale = NULL,
+          Rowv = F,
+          Colv = F,
+          key=F,
+          symkey = F,
+          symbreaks = F,
+          
+          cexCol = 1,
+          cexRow = 0.5,
+          trace="none", 
+          margins=c(100,50),
+          
+          labCol = meta_lab$V1,
+          offsetCol = -0.4,
+          offsetRow = -0.4,
+          adjCol = c(NA, 0.5), #adjusts horizontal shift of col labels leaving vertical displacement set untouched
+          
+          labRow = time_lab,
+          
+          main = paste("Raw RLU of common conditions in all brs"),
+          xlab = "tested conditions",
+          ylab = "timepoints"
+          )
+  dev.off()
+
+
+```
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE, results='show'}
+#this chunk plots a heatmap with all techreps per condition next to each other
+
+#lum: fetch scaled auc and plot all trs together for each biorep
+
+#need all data with matchin idx to meta data,
+#then loop over brs (= plates)
+
+#fetch sauc of all plates
+sauc <- c() 
+for (k in seq(1, length(all_datasets))){
+  sauc <- cbind(sauc, all_datasets[[k]]$scaled_auc_mean)
+}
+sauc <- sapply(sauc, as.numeric)
+
+#add col that marks trs within bioreps
+meta_data <- cbind(meta_data, meta_data[,c(1,2,3,4)] %>% unite(col = "fused_label", sep = ","))
+meta_data <- meta_data %>%
+  group_by(fused_label) %>%
+  mutate(tr = row_number())
+
+for (k in seq(1, length(all_br))) { #iterates over brs
+  #find max number of trs
+  max_tr <- max(meta_data$tr[meta_data$br == k])
+  #find number of conditions
+  nr_conds <- length(unique(meta_data$fused_label[meta_data$br == k]))
+  #initialise NA matrix with max_tr cols and nr_conds rows
+  sauc_collect <- matrix(ncol = max_tr, nrow = nr_conds)
+  
+  for (i in seq(1, max_tr)) { #iterates over trs
+    tr_collect <- as.data.frame(matrix(ncol = 2, nrow = nr_conds))
+    colnames(tr_collect) <- c("unique_conds", "value")
+    tr_collect$unique_conds <- unique(meta_data$fused_label[meta_data$br == k])         
+  
+    for (j in seq(1, nr_conds)){ #iterates over unique conditions
+      if (length(sauc[meta_data$br == k & meta_data$tr == i & meta_data$fused_label == tr_collect$unique_conds[j]]) == 0)
+        {
+          tr_collect$value[j] <- NA
+        } else {
+          tr_collect$value[j] <- sauc[meta_data$br == k & meta_data$tr == i & meta_data$fused_label == tr_collect$unique_conds[j]]
+        }
+    } 
+    sauc_collect[,i] <- tr_collect$value #collect values for this tr
+  }
+  
+  #plots for each br
+  col_lab <- seq(1, max_tr)
+  row_lab <- meta_data[meta_data$br == k & meta_data$tr == 1, c(4, 3, 1)] %>% unite(col = "V1", sep = " ")
+  
+  #heatmap for raw data
+  pdf(paste0(output, "02_integrate_bioreps_rlu_technical_replicates_for_unique_conditions_biorep_", k, ".pdf"), width = 15, height = 20)
+  heatmap.2(sauc_collect,
+            cellnote = round(sauc_collect, 1),
+            notecex=0.25,
+            notecol="black",
+            col=heatcols,
+            dendrogram = 'none',
+            scale = NULL,
+            Rowv = F,
+            Colv = F,
+            key=F,
+            symkey = F,
+            symbreaks = F,
+            
+            cexCol = 0.3,
+            cexRow = 0.25,
+            trace="none", 
+            #margins=c(0,0),
+            
+            labCol = col_lab,
+            srtCol = 0,
+            offsetCol = 1,
+            offsetRow = -64,
+            adjCol = c(NA, 0.5), #adjusts horizontal shift of col labels leaving vertical displacement set untouched
+            
+            labRow = row_lab$V1,
+            
+            #main = paste("Scaled AUC of RLU of biological replicate", k),
+            #cex.main = 0.1,
+            xlab = "technical replicates",
+            #ylab = "tested conditions"
+          )
+  dev.off()
+}
+
+
+```
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE, results='show'}
+#this chunk outputs a troubleshooting plot for averages WITHIN each biorep. this is not used for the final output.
+#here i used the arithmetic mean.
+
+#go to conditions that are present in all bioreps, take median over techreps within each biorep, and plot bioreps together
+  
+
+tmp1 <- data.frame(matrix(ncol = 0,
+                             nrow = 0))
+tmp2 <- tmp1
+
+for (k in seq(1, length(all_datasets))){
+  tmp1 <- c(tmp1, all_datasets[[k]]$scaled_auc_mean)
+  tmp2 <- c(tmp2, all_datasets[[k]]$scaled_auc_sd)
+
+}
+meta_data$sauc_rlu <- sapply(tmp1, as.numeric)
+meta_data$sauc_rlu_sd <- sapply(tmp2, as.numeric)
+
+
+
+#find common conditions in brs
+conds_per_br <- meta_data %>%
+      group_by(br) %>%
+      summarise_at(vars(br_label), list(unique))
+
+common_conditions <- c()
+for (i in seq(1, length(all_br)-1)){
+  common_conditions <- unique(c(common_conditions, intersect(conds_per_br$br_label[conds_per_br$br == i], conds_per_br$br_label[conds_per_br$br == i+1])))
+}
+ 
+#take medians over trs  
+dose_conds_tr_mean <- meta_data %>%
+      group_by(fused_label) %>%
+      summarise_at(vars(sauc_rlu), list(median))
+    
+dose_conds_tr_mean_separated <- dose_conds_tr_mean %>% separate(col = "fused_label", sep = ",", into = c("vc", "br", "conc", "cond"), convert = TRUE)
+dose_conds_tr_mean <- cbind(dose_conds_tr_mean_separated[c(1:4)], dose_conds_tr_mean)
+  
+dose_conds_tr_mean <- cbind(dose_conds_tr_mean, dose_conds_tr_mean[,c(1,3,4)] %>% unite(col = "br_label", sep = ","))
+  
+#split up brs and rearrange into matrix
+incr <- length(common_conditions)
+start_rows <- seq(1, incr*max(all_br), incr)
+end_rows <- seq(incr, incr*max(all_br), incr)
+
+matrix2plot_rlu <- matrix(ncol = max(all_br), nrow = incr)
+matrix2plot_rfu <- matrix2plot_rlu
+
+
+for (k in seq(1, max(all_br))){
+  tmp <- dose_conds_tr_mean[dose_conds_tr_mean$br_label %in% common_conditions,] %>%
+   arrange(br, cond, conc)
+  matrix2plot_rlu[,k] <- tmp$sauc_rlu[start_rows[k]:end_rows[k]]
+  row_lab <- tmp$br_label[start_rows[k]:end_rows[k]]
+}
+ 
+#rlu heatmap
+  pdf(paste0(output, "03_integrate_bioreps_rlu_averages_for_unique_conditions.pdf"), width = 8, height = 20)
+  heatmap.2(matrix2plot_rlu,
+            cellnote = round(matrix2plot_rlu, 1),
+            notecex=0.25,
+            notecol="black",
+            col=heatcols,
+            dendrogram = 'none',
+            scale = NULL,
+            Rowv = F,
+            Colv = F,
+            key=F,
+            symkey = F,
+            symbreaks = F,
+            
+            cexCol = 0.25,
+            cexRow = 0.25,
+            trace="none", 
+            margins=c(10,20),
+            
+            #labCol = col_lab,
+            srtCol = 0,
+            offsetCol = 1,
+            offsetRow = 0,
+            adjCol = c(NA, 0.5), #adjusts horizontal shift of col labels leaving vertical displacement set untouched
+            
+            labRow = row_lab,
+            
+            main = "RLU: Scaled AUC",
+            #cex.main = 0.1,
+            xlab = "biological replicates",
+            #ylab = "tested conditions"
+          )
+  dev.off()
+  
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE, results='show'}
+#most useful data integration: mean, median, sd and mad of all conditions with a specified concentration.
+#plot dose response curves and outputs the data as tables
+
+#dose response curves of conditions with a concentration range
+
+#fetch all normalized AUCs from individual plate plus metadata
+all_data_tmp <- as.data.frame(matrix(nrow = 0, ncol = dim(all_datasets[[1]]$meta_data_sorted)[2]+4))
+for (i in seq(1, length(all_datasets))){
+  this_data <- cbind(all_datasets[[i]]$scaled_auc_mean, 
+                     all_datasets[[i]]$scaled_auc_sd,
+                     all_datasets[[i]]$meta_data_sorted)
+  all_data_tmp <- rbind(all_data_tmp, this_data)
+ }
+all_data <- all_data_tmp
+
+#reformat data for better readability  
+all_data <- all_data %>%
+   mutate(fused_label = paste(cond, conc, sep = "_")) %>%
+    rename(srlu = "all_datasets[[i]]$scaled_auc_mean",
+           srlu_sd = "all_datasets[[i]]$scaled_auc_sd")
+ 
+#summarize rlu data
+all_data_sry_rlu <- all_data %>%
+  filter(!is.na(conc)) %>% #remove conditions without a specified concentration
+  filter(fused_label != "-_NA") %>% #remove non annotated wells
+  group_by(conc, cond) %>%
+  summarise(
+    mean = mean(srlu, na.rm = T),
+    sd = sd(srlu, na.rm = T),
+    median = median(srlu, na.rm = T),
+    mad = mad(srlu, na.rm = T),
+      ) %>%
+  mutate(log10conc = log10(conc),
+         readout = "Mm in broth")
+all_data_sry <- rbind(all_data_sry_rlu)
+
+#write to csv
+write.csv(all_data_sry, paste0(output, "mean_median_summary_of_dosedependencies.csv"))
+
+#loop over conditions with a specified concentration and plot all concentrations on a dose response curve
+for (i in seq(1, length(unique(all_data_sry$cond)))) {
+    this_cond <- unique(all_data_sry$cond)[i]
+    
+    df2plot <- all_data_sry[,2: dim(all_data_sry)[2]] #remove conc
+    df2plot <- df2plot[df2plot$cond == this_cond,]
+    
+    dodge_val <- 0.3
+    bar_width <- 0.1
+    
+    #adjust dodge value and bar width to lower values if a dilution series has a very low dilution (a dilution factor lower than 1)
+    if(sum(10^diff(unique(sort(df2plot$log10conc))) < 1) > 1) {
+      dodge_val <- 0.02
+      bar_width <- 0.05
+    }
+    
+    #plot mean and sd
+    p <- ggplot(df2plot, aes(log10conc, mean)) +
+      geom_errorbar(
+      aes(ymin = mean-sd, ymax = mean+sd, color = readout),
+      position = position_dodge(0.3), width = 0.2
+      )+
+      geom_point(aes(color = readout), position = position_dodge(0.3)) +
+      ylim(-1.5, 2.5) +
+      geom_hline(yintercept=1, linetype="dashed", 
+                color = "grey60", size=0.75) +
+      geom_hline(yintercept=0, linetype="dashed", 
+                color = "grey60", size=0.75) +
+      geom_hline(yintercept=0.5, linetype="dashed", 
+                color = "salmon", size=0.75) +
+      scale_color_manual(values = c("black")) +
+    ggtitle(paste(this_cond, ": dose response curve, mean & sd"))
+    print(p)
+    
+    
+    #plot median and mad
+    p <- ggplot(df2plot, aes(log10conc, median)) +
+      geom_errorbar(
+      aes(ymin = median-mad, ymax = median+mad, color = readout),
+      position = position_dodge(0.3), width = 0.2
+      )+
+      geom_point(aes(color = readout), position = position_dodge(0.3)) +
+      ylim(-1.5, 2.5) +
+      geom_hline(yintercept=1, linetype="dashed", 
+                color = "grey60", size=0.75) +
+      geom_hline(yintercept=0, linetype="dashed", 
+                color = "grey60", size=0.75) +
+      geom_hline(yintercept=0.5, linetype="dashed", 
+                color = "salmon", size=0.75) +
+      scale_color_manual(values = c("black")) +
+    ggtitle(paste(this_cond, ":  dose response curve, median & mad"))
+    print(p)
+}
+
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE, results='show'}
+
+save.image(paste0(output, "integrate_bioreps_workspace.Rdata"))
+print(sessionInfo())
+  
+```
+

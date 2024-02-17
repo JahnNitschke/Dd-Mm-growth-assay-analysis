@@ -1,0 +1,479 @@
+---
+title: "Normalized residual growth for Mm in broth experiment XYZ"
+author: "JN"
+date: "`r date()`"
+output:
+  pdf_document: default
+---
+
+```{r setup, include=FALSE}
+
+#This script loops over 384 reader data and outputs normalized area under the curve (AUC) values.
+#It generates heatmaps visualising the experiment and other troubleshooting plots
+#Normally, biological replicates are on different well plates, but if they are on the same plate, it will still work under the #condition that they have the same vehicle and positive controls.
+#Raw data need to be annotated with 4 rows on top of the respective well: 
+#vc = vehicle control of the condition in this well (prefix with "vc" to retrieve them easily, e.g. VC DMSO 0.3%);
+#br = biological replicate (numerical)
+#conc = concentration (numerical, no units in the xlsx cell)
+#cond = condition (name of the condition).
+
+#The wells filled with the vehicle controls have identical entries in cond and vc (e.g. VC DMSO 0.3%), but "-" in conc; the wells #filled with the positive control have also "-" in conc, "PC Rif" in cond, and the mildest vehicle control in vc. The PC gives #robustly curves with a negative slope and the effect of the actual vehicle (which is EtOH 50%) is negligible. The PC is only used #for robust z'factor computation, not for normalization.
+
+#auc = area under the curve
+#sauc = scaled area under the curve (scaled to vc and a baseline curve)
+#rlu = random luminescence unit, bacterial growth
+
+#If, for example, you use another measurement protocol at the plate reader, adapt the first section, where it finds the two measurement blocks of luminescence by looking for specific strings
+
+#Adjust the paths in this script to your folder, then knit
+
+#clean workspace
+rm(list=ls())
+
+library(xlsx)
+library(readxl)
+library(gplots)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+
+#colors for heatmap
+heatcols <- colorRampPalette(c("deepskyblue2", "white" ,"brown1"))( 75 )
+
+#in and output paths
+input <- "C:/Users/jahn_/Desktop/analyses/broth_demonstration_dataset/input"
+output <- "C:/Users/jahn_/Desktop/analyses/broth_demonstration_dataset/output/"
+dir.create(output) #create output directory
+```
+
+```{r, echo=FALSE}
+#print all files found in input path, absolute paths and filenames
+
+all_files <- list.files(input, pattern="*.xlsx", all.files=FALSE,
+    full.names=TRUE)
+
+all_files_filenames <- list.files(input, pattern="*.xlsx", all.files=FALSE,
+    full.names=FALSE)
+
+print(c("all files in the directory with the absolute path: ", all_files))
+
+print(c("all files in the directory: ", all_files_filenames))
+
+```
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE, results='show'}
+#this chunk loops over the plates and calculates per plate summary data
+
+#initialise qcplot collect
+qcplot_collect <- data.frame(matrix(ncol = 8, nrow = 0))
+colnames(qcplot_collect) <- c("rlu_auc", "rlu_sauc", "plate_row", "plate_col", "cond", "ctrl_type", "plate", "br")
+
+#loop over plates k
+for (k in seq(1, length(all_files))) {
+  
+  #read workbook k
+  print(paste0("analysis for ", all_files_filenames[k]))
+  wb <- loadWorkbook(all_files[k])
+  all_sheets <- names(getSheets(wb)) 
+  sheet <- all_sheets[1]
+  
+  #load sheet 1 containing the raw data
+  raw_sheet <- read_xlsx(all_files[k], sheet = sheet)
+  
+  #find lum block by looking for pattern "Read 1:Lum". Move one row further..
+  s_row <- which(raw_sheet$`Software Version` == "Lum") - 2
+  #start col is the fourth
+  s_col <- 4
+  #find end row by checking for first NA in col 4 after s_row
+  found <- F
+  c <- 0
+  while (found == F) {
+    if  (anyNA(raw_sheet[s_row+c, s_col])){
+      found <- T
+    } else {
+        e_row <- s_row+c
+    }
+    c <- c + 1
+  }
+  #find end column by taking the last col
+  e_col <- dim(raw_sheet)[2]
+  
+  
+  #subset the lum data block
+  raw_data_tmp <- data.frame(matrix(nrow = unique(e_row-s_row)+1, ncol = 0))
+  for (i in seq(1, length(s_row))) {
+    raw_data_tmp <- cbind(raw_data_tmp, raw_sheet[s_row[i]:e_row[i], s_col:e_col])
+  }
+  raw_data_rlu <- raw_data_tmp
+  
+  #get timepoints
+  timepoints <- raw_sheet[(s_row[1]+5):e_row[1], s_col-2]
+  timepoints_n <- sapply(timepoints, as.numeric) #make values numeric
+  timepoints_n <- timepoints_n*24  #convert from days to hours
+  
+  
+  raw_data_rlu_t <- t(raw_data_rlu) %>% as_tibble()
+  raw_data_rlu_t_numeric <- raw_data_rlu_t %>% 
+    mutate_at(6:ncol(raw_data_rlu_t), as.numeric) %>%
+    rename(vc = V1,
+           br = V2,
+           conc = V3,
+           cond = V4,
+           well = V5) %>%
+    rename_with(~ as.character(seq(1:(ncol(raw_data_rlu_t)-5))), all_of(colnames(raw_data_rlu_t)[6:ncol(raw_data_rlu_t)])) %>% #rename timepoints columns
+    mutate_at(c("br", "conc"), as.numeric) %>% #make br and conc numeric
+    select(1:ncol(raw_data_rlu_t)) %>% #use this line to crop column/timepoints if you want
+    group_by(vc, br, conc, cond, well) %>%
+    arrange(cond, conc, br)
+  
+  rlu_data_num_sorted <- t(raw_data_rlu_t_numeric[,6:ncol(raw_data_rlu_t_numeric)])
+  meta_data_sorted <- raw_data_rlu_t_numeric[,1:5]
+  
+  #plots of raw data
+  
+  #plot temperature
+  temp <- raw_sheet[(s_row+5):e_row, (s_col-1)]
+  temp_n <- sapply(temp, as.numeric)
+  plot(timepoints_n, temp_n, type = "l", main = paste("Temparature:", paste0("plate ", k)), 
+       xlab = "time in h", ylab = "temperature in degree C")
+  
+  #print heatmaps to visualize growth (color code) of sorted conditions (x-axis) over time (y-axis)
+  pdf(paste0(output, "01_RLU_tmp_", all_files_filenames[k], ".pdf"), width = 100, height = 50)
+  #heatmap for rlu data
+  heatmap.2(x = rlu_data_num_sorted,
+            cellnote = rlu_data_num_sorted,
+            notecex = 0.4,
+            notecol = "black",
+            
+            col = heatcols,
+            dendrogram = 'none',
+            scale = NULL,
+            Rowv = F,
+            Colv = F,
+            key=F,
+            symkey = F,
+            symbreaks = F,
+            #colsep = c(52, 101),
+            
+            cexCol = 1,
+            cexRow = 1,
+            trace="none", 
+            margins=c(100,50),
+            
+            labCol = paste0(meta_data_sorted$cond, ", ", round(meta_data_sorted$conc, 4), ", ", meta_data_sorted$br, ", ", meta_data_sorted$well),
+            offsetCol = -0.4,
+            offsetRow = -0.4,
+            adjCol = c(NA, 0.5), #adjusts horizontal shift of col labels leaving vertical displacement set untouched
+            main = paste("RLU heatmap:", paste0("plate ", k)),
+            cex.main = 10
+            )
+  dev.off()
+  
+ 
+ 
+  #calculate area under the curve (AUC) by taking the mean between two timepoints and multiplying by the time difference between them.
+  #graphically, this gives the area of a square with identical area to a trapez drawn between the two time points.
+  
+  #calculate AUC (trapezoids between timepoints) for every column for rlu
+  for (i in seq(1, dim(rlu_data_num_sorted)[1]-1)) { #loop over timepoints
+    j <- i+1 #index of next timepoint
+    if (i == 1) { #compute auc of timepoints 1 & 2, then accumulate following timepoints
+      auc_tmp <- ((rlu_data_num_sorted[i,]+rlu_data_num_sorted[j,])/2)*(timepoints_n[j]-timepoints_n[i])
+    } else {
+      auc_tmp <- auc_tmp + ((rlu_data_num_sorted[i,]+rlu_data_num_sorted[j,])/2)*(timepoints_n[j]-timepoints_n[i])
+    }
+  }
+  auc <- auc_tmp
+  
+  
+  #before looping over bioreps in this plate, initialise container df with sd & central value for vcs per readout
+  
+  #get all instances of vehicle controls in this plate
+  all_vc <- unique(meta_data_sorted$vc)[unique(meta_data_sorted$vc) != "-"]
+
+  #collect the union of all vc indeces, used later for qc plots
+  vc_idx <- which(meta_data_sorted$cond %in% all_vc)
+  pc_idx <- which(meta_data_sorted$cond == "PC Rif")
+  
+  #safe empty container for later use, when looping over bioreps over the same plate (if the exp design included several bioreps on the same plate)
+  ctrls_sry_br_empty <- data.frame(matrix(nrow = (length(all_vc) + 1), ncol = 6))
+  colnames(ctrls_sry_br_empty) <- c("ctrl", "readout", "mean", "sd", "median", "mad")
+  #initialise labels in first two cols
+  ctrls_sry_br_empty$ctrl <- rep(c(all_vc, "PC Rif"))
+  ctrls_sry_br_empty$readout <- c(rep("RLU", length(all_vc) + 1))
+  
+  #initialise container variables for scaled aucs for both readouts
+  all_br <- unique(meta_data_sorted$br) #all instances of bioreps in this plate
+  sauc_rlu <- matrix(nrow = 0, ncol = 1)
+  sauc_rlu_sd <- matrix(nrow = 0, ncol = 1)
+  
+  #loop over bioreps in this plate to populate container variables with ctrl summary data and normalized data.
+  for( h in seq(min(all_br), max(all_br))){ #loop over brs present in this plate
+    meta_data_sorted_br <- meta_data_sorted[meta_data_sorted$br == h,]
+    auc_br <- auc[meta_data_sorted$br == h]
+    
+    #create ctrls lookup table for this br
+    ctrls_sry_br <- ctrls_sry_br_empty
+    for(i in seq(1, nrow(ctrls_sry_br))){ #loop over ctrls in ctrl_sry table
+      these_vc_idx <- which(meta_data_sorted_br$cond == ctrls_sry_br$ctrl[i])
+      
+      #get RLU values for this ctrl
+      ctrls_sry_br$mean[i] <- mean(auc_br[these_vc_idx])
+      ctrls_sry_br$median[i] <- median(auc_br[these_vc_idx])
+      ctrls_sry_br$sd[i] <- sd(auc_br[these_vc_idx])
+      ctrls_sry_br$mad[i] <- mad(auc_br[these_vc_idx])
+    }
+    
+    #append a t0 baseline ctrl RLU
+    ctrls_sry_br <- rbind(ctrls_sry_br, c("PC baseline", "RLU", 
+                                  sum(median(rlu_data_num_sorted[1,])*diff(timepoints_n)), 0, 
+                                  sum(median(rlu_data_num_sorted[1,])*diff(timepoints_n)), 0))
+    
+    #ensure nrs are numeric
+    ctrls_sry_br[,3:6] <- sapply(ctrls_sry_br[,3:6], as.numeric)
+  
+    #compute and output robust z'factors per vehicle control on this plate and per biorep
+    vcs_this_br <- unique(meta_data_sorted_br$vc)
+    
+    for (i in seq(1,length(vcs_this_br))){
+      this_vc <- vcs_this_br[i]
+      tbl_ref_idx <- length(vcs_this_br)+1
+      
+      z_factor <- 1-(3*(ctrls_sry_br$mad[i] + ctrls_sry_br$mad[tbl_ref_idx]))/abs(ctrls_sry_br$median[i] - ctrls_sry_br$median[tbl_ref_idx])
+      print(paste0(this_vc, " Robust z'-factor of rlu for plate ", all_files_filenames[k], ", biorep ", h, " : "))
+      print(round(z_factor, 2))
+    }
+    
+    
+    #scale auc of RLU according to each VC within this br
+    #initialize container variables for the following loop
+    sauc_rlu_br <- matrix(nrow = length(auc_br), ncol = 0)
+    sauc_rlu_br_sd <- matrix(nrow = length(auc_br), ncol = 0)
+  
+    for (i in seq(1, length(all_vc))){ #loop over VCs
+      this_vc <- all_vc[i]
+    
+      #find all conditions with this vc
+      these_idx <- which(meta_data_sorted_br$vc %in% this_vc)
+      #add indices of PC
+      these_idx <- c(these_idx, which(meta_data_sorted_br$cond == "PC Rif"))
+    
+    
+      this_vc_row <- which(ctrls_sry_br$ctrl == this_vc & ctrls_sry_br$readout == "RLU")
+      this_pc_row <- which(ctrls_sry_br$ctrl == "PC baseline" & ctrls_sry_br$readout == "RLU")
+    
+      sauc_rlu_br[these_idx] <- (auc_br[these_idx]-ctrls_sry_br$median[this_pc_row]) * (1/(ctrls_sry_br$median[this_vc_row]-ctrls_sry_br$median[this_pc_row]))
+    
+      #error propagation for VCs
+      sauc_rlu_br_sd[these_idx] <- round( sqrt( (ctrls_sry_br$sd[this_pc_row]/ctrls_sry_br$mean[this_pc_row])^2 + 
+                   ( (sqrt(ctrls_sry_br$sd[this_pc_row]^2 + ctrls_sry_br$sd[this_vc_row]^2) /
+                      (ctrls_sry_br$mean[this_vc_row]-ctrls_sry_br$mean[this_pc_row])) )^2 ), 
+           4)
+    }
+  
+    
+    #collect br saucs
+    sauc_rlu <- c(sauc_rlu, sauc_rlu_br)
+    sauc_rlu_sd <- c(sauc_rlu_sd, sauc_rlu_br_sd)
+    
+    
+    
+  } #finish loop over brs in this plate
+  
+  #QC plots
+  qcplot <- data.frame(matrix(ncol = 8, nrow = length(auc)))
+  colnames(qcplot) <- c("rlu_auc", "rlu_sauc", "plate_row", "plate_col", "cond", "ctrl_type", "plate", "br")
+  
+  wp_row <- substr(as.character(meta_data_sorted$well),1,1)
+  wp_col <- substr(as.character(meta_data_sorted$well),2,3)
+  
+  qcplot$rlu_auc <- auc
+  qcplot$rlu_sauc <- sauc_rlu
+  qcplot$plate_row <- wp_row
+  qcplot$plate_col <- wp_col
+  qcplot$cond <- as.character(meta_data_sorted$cond)
+  qcplot$plate <- paste0("plate", k)
+  qcplot$br <- as.character(meta_data_sorted$br)
+  
+  qcplot$ctrl_type <- "sample"
+  qcplot$ctrl_type[pc_idx] <- qcplot$cond[pc_idx]
+  qcplot$ctrl_type[vc_idx] <- qcplot$cond[vc_idx]
+  
+  qcplot_collect <- rbind(qcplot_collect, qcplot)
+  
+  #reformat for output (making it compatible with the follow up script)
+  meta_data_sorted <- as.data.frame(meta_data_sorted)
+  names(auc) <- as.character(seq(1,nrow(timepoints)))
+  
+  #collect paramaters for output 
+  out <- list(sauc_rlu, sauc_rlu_sd,
+              rlu_data_num_sorted,
+              meta_data_sorted, auc, 
+              temp, 
+              timepoints_n, z_factor,
+              all_files_filenames[k],
+              qcplot_collect)
+  
+  names(out) <- c("scaled_auc_mean", "scaled_auc_sd", 
+                  "rlu_data_sorted", 
+                  "meta_data_sorted", "auc", 
+                  "temp", 
+                  "timepoints", "zfactor",
+                  "filename",
+                  "qcplot")
+  
+  
+  #save auc and sauc data from this plate without averages
+  save(out, file = paste0(output, "plate_data_", all_files_filenames[k], ".RData"))
+  
+  #special report on conditions with a specified dose
+  #useful if they belong to a dose response curve
+  
+  #second output file for dose dependencies
+  dose_conds_meta <- meta_data_sorted[!is.na(meta_data_sorted$conc),]
+  dose_conds_rlu <- sauc_rlu[!is.na(meta_data_sorted$conc)]
+  dose_conds_sry <- cbind(dose_conds_meta, dose_conds_rlu)
+  
+  #generate group labels for trs (allows discrimination between brs)
+  dose_conds_sry$tr_label <- dose_conds_sry[,1:4] %>% unite(col = "tr_label", sep = ",")
+  
+  #generate group labels for trs (pools all brs)
+  dose_conds_sry$br_label <- dose_conds_sry[,c(1,3,4)] %>% unite(col = "br_label", sep = ",")
+  
+  
+  #average over bioreps
+  #calculate medians per group
+  dose_conds_br_mean <- dose_conds_sry %>%
+    group_by(br_label) %>%
+    summarise_at(vars(dose_conds_rlu), list(name = median, mad, mean, sd))
+  
+  #separate group labels again
+  dose_conds_br_mean_separated <- dose_conds_br_mean$br_label %>% separate(col = "br_label", sep = ",", into = c("vc", "conc", "cond"), convert = TRUE)
+  dose_conds_br_mean <- cbind(dose_conds_br_mean_separated, dose_conds_br_mean)
+  #remove fused label
+  dose_conds_br_mean <- dose_conds_br_mean[-c(4)]
+  dose_conds_br_mean <- dose_conds_br_mean %>% 
+    rename(Mm_in_broth_median = name,
+           Mm_in_broth_mad = fn1,
+           Mm_in_broth_mean = fn2,
+           Mm_in_broth_sd = fn3)
+  
+  
+  #average within bioreps, over techreps of this plate
+  #calculate medians per group, per biorep in this plate
+  dose_conds_tr_mean <- dose_conds_sry %>%
+    group_by(tr_label) %>%
+    summarise_at(vars(dose_conds_rlu), list(name = median, mad, mean, sd))
+  
+  #separate group labels again
+  dose_conds_tr_mean_separated <- dose_conds_tr_mean$tr_label %>% separate(col = "tr_label", sep = ",", into = c("vc", "br", "conc", "cond"), convert = TRUE)
+  dose_conds_tr_mean <- cbind(dose_conds_tr_mean_separated, dose_conds_tr_mean)
+  #remove fused label
+  dose_conds_tr_mean <- dose_conds_tr_mean[-c(5)]
+  dose_conds_tr_mean <- dose_conds_tr_mean %>% 
+    rename(Mm_in_broth_median = name,
+           Mm_in_broth_mad = fn1,
+           Mm_in_broth_mean = fn2,
+           Mm_in_broth_sd = fn3)
+  
+  #sort tables
+  dose_conds_tr_mean <- dose_conds_tr_mean %>%
+    group_by(vc, br, conc, cond) %>%
+    arrange(cond, conc, br)
+  
+  dose_conds_br_mean <- dose_conds_br_mean %>%
+    group_by(vc, conc, cond) %>%
+    arrange(cond, conc)
+  
+  #add log10 conc col
+  dose_conds_br_mean$log10conc <- log(dose_conds_br_mean$conc, 10)
+  dose_conds_br_mean <- relocate(dose_conds_br_mean, log10conc, .before = Mm_in_broth_median)
+  
+  dose_conds_tr_mean$log10conc <- log(dose_conds_tr_mean$conc, 10)
+  dose_conds_tr_mean <- relocate(dose_conds_tr_mean, log10conc, .before = Mm_in_broth_median)
+  
+  #add dose response plots for rlu and rfu
+  all_conds <- unique(dose_conds_br_mean$cond)
+  print("Dose response curves over all bioreps within this plate")
+  
+  for (i in seq(1, length(all_conds))) { #loop over conditions and output a plot
+    this_cond <- all_conds[i]
+    
+    df2plot <- dose_conds_br_mean[dose_conds_br_mean$cond == this_cond, ]
+    
+    p <- ggplot(data = df2plot, aes(log10conc, Mm_in_broth_mean, shape = cond)) +
+      geom_point(alpha=0.5, size=2) +
+      geom_errorbar(aes(ymin=Mm_in_broth_mean-Mm_in_broth_sd, ymax=Mm_in_broth_mean+Mm_in_broth_sd),
+                    width = 0.1) +
+      ylim(-1, 2.0) +
+      ggtitle(paste(this_cond, ": RLU dose response curve, mean & sd"))
+    print(p)
+    
+    p <- ggplot(data = df2plot, aes(log10conc, Mm_in_broth_median, shape = cond)) +
+      geom_point(alpha=0.5, size=2) +
+      geom_errorbar(aes(ymin=Mm_in_broth_median-Mm_in_broth_mad, ymax=Mm_in_broth_median+Mm_in_broth_mad),
+                    width = 0.1) +
+      ylim(-1, 2.0) +
+      ggtitle(paste(this_cond, ": RLU dose response curve, median & mad"))
+    print(p)
+  }
+  
+  #output averages over bioreps in the same plate; and over techreps within the same plate
+  write.csv(dose_conds_br_mean, file = paste0(output, "plate_data_concentrations_br_averages", all_files_filenames[k], ".csv"))
+  write.csv(dose_conds_tr_mean, file = paste0(output, "plate_data_concentrations_tr_averages", all_files_filenames[k], ".csv"))
+  
+  
+  #prepare dose_conds_sry for export, no averages, all trs are exported
+  dose_conds_sry$log10conc <- log(dose_conds_sry$conc, 10)
+  out_all_trs <- tibble(dose_conds_sry[,c(1:6, 9)]) %>%
+    relocate(log10conc, .before = dose_conds_rlu)
+  write.csv(out_all_trs, 
+            file = paste0(output, "plate_data_concentrations_all_trs_", all_files_filenames[k], ".csv"), 
+            sep = "/t", 
+            quote = F)
+  save.image(paste0(output, all_files_filenames[k], "_workspace.Rdata")) 
+  
+} #finish loop over plate
+
+```
+
+
+
+```{r, echo=FALSE, message=FALSE, warning=FALSE, error=FALSE, results='show'}
+
+
+#unnormalized, ctrls are colored
+  
+  #rlu unnormalized vs normalized, ctrls are colored
+  p <- ggplot(data = qcplot_collect, aes(rlu_auc, rlu_sauc, color= ctrl_type, shape = plate)) +
+  geom_point(alpha=0.5, size=2) 
+  print(p)
+  
+ 
+  p <- ggplot(data = qcplot_collect, aes(rlu_auc, rlu_sauc, color= plate, shape = br)) +
+  geom_point(alpha=0.5, size=2) 
+  print(p)
+  
+  
+  #rlu unnormalized vs normalized, ctrls are colored
+  p <- ggplot(data = qcplot, aes(rlu_auc, rlu_sauc, color= ctrl_type)) +
+  geom_point(alpha=0.5, size=2) 
+  print(p)
+  
+  
+  #rlu unnormalized vs normalized, ctrls are colored
+  p <- ggplot(data = qcplot, aes(rlu_auc, rlu_sauc, color= br)) +
+  geom_point(alpha=0.5, size=2) 
+  print(p)
+  
+    #rlu unnormalized vs normalized, ctrls are colored
+  p <- ggplot(data = qcplot, aes(br, rlu_sauc, color= ctrl_type)) +
+  geom_point(alpha=0.5, size=2) 
+  print(p)
+
+```
+
+```{r, echo = FALSE}
+print(sessionInfo())
+
+```
